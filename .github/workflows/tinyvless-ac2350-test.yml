@@ -1,0 +1,68 @@
+name: TinyVLESS AC2350 test binary
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/tinyvless-ac2350-test.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Fetch pinned upstream
+        run: |
+          git init source
+          cd source
+          git remote add origin https://github.com/SWYOD/tinyvless.git
+          git fetch --depth 1 origin 38e717a7f941b2e2dfdb73e45a6f45d1dffeaa68
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = 38e717a7f941b2e2dfdb73e45a6f45d1dffeaa68
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Apply endian-safe masking patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/src/tinyvless/main.go')
+          s = p.read_text()
+          start = s.index('\tmw := uint32(mask[0])')
+          end = s.index('\tfor ; i < l; i++ {', start)
+          s = s[:start] + '\ti := 0\n' + s[end:]
+          s = s.replace('\t"unsafe"\n', '')
+          assert 'unsafe.Pointer' not in s
+          p.write_text(s)
+          PY
+          cd source
+          git diff -- src/tinyvless/main.go
+      - name: Build static big-endian MIPS softfloat binary
+        working-directory: source/src/tinyvless
+        env:
+          GOOS: linux
+          GOARCH: mips
+          GOMIPS: softfloat
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: auto
+        run: |
+          mkdir -p ../../../dist
+          go version
+          go build -trimpath -ldflags='-s -w' -o ../../../dist/tinyvless-linux-mips-softfloat .
+          go version -m ../../../dist/tinyvless-linux-mips-softfloat
+      - name: Inspect and checksum
+        run: |
+          git -C source diff > dist/endian-safe.patch
+          printf '%s\n' 'Upstream: SWYOD/tinyvless' 'Commit: 38e717a7f941b2e2dfdb73e45a6f45d1dffeaa68' 'Target: linux/mips softfloat, CGO disabled' 'Experimental binary; not router firmware. No runtime test performed.' > dist/BUILD-INFO.txt
+          file dist/tinyvless-linux-mips-softfloat
+          wc -c dist/tinyvless-linux-mips-softfloat
+          cd dist
+          sha256sum tinyvless-linux-mips-softfloat > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tinyvless-ac2350-mips-test
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
